@@ -34,4 +34,11 @@ COPY --from=build /build/bridge /protonmail/
 COPY --from=build /build/proton-bridge /protonmail/
 COPY --from=build /build/vault-editor /protonmail/
 
+# Add a user 'protonmail' with UID 8535
+RUN useradd -u 8535 -d /home/protonmail protonmail \
+    && mkdir -p /home/protonmail \
+    && chown protonmail: /home/protonmail
+# change to non-privileged user for extra security
+USER protonmail
+
 ENTRYPOINT ["bash", "/protonmail/entrypoint.sh"]
