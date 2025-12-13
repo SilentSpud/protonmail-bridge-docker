@@ -19,8 +19,8 @@ if [[ $1 == init ]]; then
     # Login
     /protonmail/proton-bridge --cli $@
 
-elif [[ $1 == debug ]]; then
-    echo "Entering 'debug' mode"
+elif [[ $1 == shell ]]; then
+    echo "Entering 'shell' mode"
 
     # Debug mode - call CLI directly
     /protonmail/proton-bridge --cli

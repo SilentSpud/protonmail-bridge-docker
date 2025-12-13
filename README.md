@@ -48,7 +48,7 @@ Wait for the bridge to startup, then you will see a prompt appear for [Proton Ma
 If you want to access the cli again later without initializing keys (for example to call `info` again), use this command:
 
 ```
-docker compose run protonmail-bridge debug
+docker compose run protonmail-bridge shell
 ```
 
 ## Run
