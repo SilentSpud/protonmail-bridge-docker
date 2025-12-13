@@ -1,14 +1,17 @@
-version: '2.1'
-
 services:
   protonmail-bridge:
     image: shenxn/protonmail-bridge
+    expose:
+      - "25"
+      - "143"
     ports:
-      - 1025:25/tcp
-      - 1143:143/tcp
+      - "1025:25/tcp"
+      - "1143:143/tcp"
+    cap_add: 
+      - NET_BIND_SERVICE
     restart: unless-stopped
     volumes:
-      - protonmail:/root
+      - protonmail_data:/home/protonmail
+
 volumes:
-  protonmail:
-    name: protonmail
+  protonmail_data:
