@@ -9,9 +9,27 @@ services:
       - "1143:143/tcp"
     cap_add: 
       - NET_BIND_SERVICE
+    environment:
+      SMTP_PORT: 25
+      IMAP_PORT: 143
+      DISABLE_TELEMETRY: "true"
+      DISABLE_AUTO_UPDATE: "true"
+      USE_TLS: "true" # "true" uses STARTTLS for IMAP/SMTP connections. "false" uses SSL.
+      # Optional: Set BRIDGE_USER and BRIDGE_PASSWORD_FILE to auto-login
+      BRIDGE_USER: yourusername@proton.me
+      BRIDGE_PASSWORD_FILE: /run/secrets/bridge_password
+      BRIDGE_OTP_FILE: /run/secrets/bridge_otp # Optional: Only set if using 2FA
+      INFO_DIR: /credentials # Optional: File to output email config info into instead of printing to console. Must be a mounted volume.
     restart: unless-stopped
     volumes:
-      - protonmail_data:/home/protonmail
+      - protonmail_data:/protonmail
+      - ./credentials/:/credentials
 
 volumes:
   protonmail_data:
+
+secrets:
+   bridge_password:
+     file: bridge_password.txt
+   bridge_otp:
+     file: bridge_otp.txt

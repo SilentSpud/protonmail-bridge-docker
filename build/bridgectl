@@ -1,0 +1,141 @@
+#!/usr/bin/env bash
+
+set -ue
+
+#region Sanity checks
+if [[ -z "$SMTP_PORT" || -z "$IMAP_PORT" ]]; then
+	echo "Error: SMTP_PORT and IMAP_PORT must be set" >&2
+  sleep 10
+	exit 1
+fi
+
+if ! [[ $SMTP_PORT =~ ^[0-9]+$ ]] || (( SMTP_PORT < 1 || SMTP_PORT > 65535 )); then
+	echo "Error: SMTP_PORT ('$SMTP_PORT') is not a valid port (1-65535)" >&2
+  sleep 10
+	exit 1
+fi
+
+if ! [[ $IMAP_PORT =~ ^[0-9]+$ ]] || (( IMAP_PORT < 1 || IMAP_PORT > 65535 )); then
+	echo "Error: IMAP_PORT ('$IMAP_PORT') is not a valid port (1-65535)" >&2
+  sleep 10
+	exit 1
+fi
+
+# Bump up the bridge ports if they conflict with the requested ports
+BRIDGE_SMTP_PORT=1025
+if [[ "${SMTP_PORT:-}" == "1025" ]]; then
+  BRIDGE_SMTP_PORT=1026
+fi
+
+BRIDGE_IMAP_PORT=1143
+if [[ "${IMAP_PORT:-}" == "1143" ]]; then
+  BRIDGE_IMAP_PORT=1144
+fi
+export BRIDGE_SMTP_PORT BRIDGE_IMAP_PORT
+
+# Verify DISABLE_TELEMETRY, DISABLE_AUTO_UPDATE, and USE_SSL are valid true/false values
+for V_NAME in DISABLE_TELEMETRY DISABLE_AUTO_UPDATE USE_TLS; do
+	V_VAL="${!V_NAME:-}"
+	if [[ "$V_VAL" != "true" && "$V_VAL" != "false" ]]; then
+		echo "Warning: $V_NAME ('$V_VAL') is not a valid boolean (true/false). Defaulting to 'true'" >&2
+		export "$V_NAME"=true
+	fi
+done
+#endregion
+
+#region GPG & pass initialization
+if [[ ! -d $HOME/.gnupg ]]; then
+	echo "No GPG key found in $HOME/.gnupg. Generating a key and initializing pass"
+  PARAM_FILE="$(mktemp --tmpdir= gpgparams.XXXXXX)"
+  cat << EOF > "$PARAM_FILE"
+%no-protection
+Key-Type: RSA
+Key-Length: 2048
+Name-Real: pass-key
+Expire-Date: 0
+%commit
+EOF
+	gpg --generate-key --batch "$PARAM_FILE"
+  rm -f "$PARAM_FILE"
+	pass init pass-key
+fi
+#endregion
+
+#region Delete lock file if it exists and kill the process holding it
+BRIDGE_LOCK="$HOME/.cache/protonmail/bridge-v3/bridge-v3.lock"
+if [[ -f "$BRIDGE_LOCK" ]]; then
+	BRIDGE_PID="$(cat "$BRIDGE_LOCK")"
+	if [ -d "/proc/${BRIDGE_PID}" ]; then
+    # Process is running, kill it and delete the lock
+    BRIDGE_NAME=$(cat /proc/${BRIDGE_PID}/comm 2>/dev/null || echo "unknown")
+		echo "Warning: Bridge file is locked by process '$BRIDGE_NAME' ($BRIDGE_PID). Terminating PID $BRIDGE_PID and deleting $BRIDGE_LOCK" >&2
+    if ! kill "$BRIDGE_PID" 2>/dev/null; then
+      echo "Error: Failed to terminate process '$BRIDGE_NAME' ($BRIDGE_PID)" >&2
+      exit 1
+    fi
+		rm -f "$BRIDGE_LOCK"
+	else
+		echo "Stale lock detected (PID $BRIDGE_PID not running). Deleting $BRIDGE_LOCK"
+		rm -f "$BRIDGE_LOCK"
+	fi
+fi
+#endregion
+
+#region Setup ProtonMail Bridge if no data exists
+if [[ ( ! -d "$HOME/.local/share/protonmail/bridge-v3" ) && $$ -eq 1 && ( -z "${BRIDGE_USER:-}" || -z "${BRIDGE_PASSWORD_FILE:-}" ) ]]; then
+	echo "Error: No ProtonMail data found and BRIDGE_USER or BRIDGE_PASSWORD_FILE is not defined" >&2
+	echo "For interactive setup, open a shell and run 'bridgectl' manually" >&2
+	echo "For automatic setup, define BRIDGE_USER and add the password and OTP codes to the container secrets" >&2
+	sleep 10
+	exit 1
+fi
+
+if [[ $$ -eq 1 ]]; then
+	export AUTO_SETUP=true
+fi
+
+if [[ -f "$BRIDGE_PASSWORD_FILE" ]]; then
+	export BRIDGE_PASSWORD="$(cat "$BRIDGE_PASSWORD_FILE")"
+fi
+
+if [[ -n "${BRIDGE_OTP_FILE:-}" && -f "$BRIDGE_OTP_FILE" ]]; then
+	export BRIDGE_OTP="$(cat "$BRIDGE_OTP_FILE")"
+fi
+
+expect -f /usr/local/share/protonmail/bridge-init.exp
+RC=$?
+if [[ $RC -ne 0 ]]; then
+	echo "Error: expect failed with exit code $RC" >&2
+	sleep 10
+	exit $RC
+fi
+
+# socat will make the conn appear to come from 127.0.0.1
+# ProtonMail Bridge currently expects that.
+# It also allows us to bind to the real ports :)
+# Check if we have permission to bind to privileged ports before we try
+CAP_HEX=$(awk '/CapBnd/ {print $2}' /proc/$BASHPID/status)
+CAP_VAL=$(( 0x${CAP_HEX} & 0x400 ))
+
+if [[ $CAP_VAL == 0x400 ]]; then # NET_BIND_SERVICE capability
+	socat TCP-LISTEN:$SMTP_PORT,fork TCP:127.0.0.1:$BRIDGE_SMTP_PORT &
+	socat TCP-LISTEN:$IMAP_PORT,fork TCP:127.0.0.1:$BRIDGE_IMAP_PORT &
+else
+	# Fail if trying to bind to a privileged port without permission
+	for PORT_NAME in "SMTP_PORT" "IMAP_PORT"; do
+	  PORT_NUM="${!PORT_NAME:-}"
+		if [ "$PORT_NUM" -lt 1024 ]; then
+			echo "Error: $PORT_NAME ($PORT_NUM) is privileged but the container doesn't have permission to bind to it. Either run the container as root with the NET_BIND_SERVICE capability, or use non-privileged ports" >&2
+			exit 1
+		fi
+	done
+
+	# Bind to the requested non-privileged ports normally
+	socat TCP-LISTEN:$SMTP_PORT,fork TCP:127.0.0.1:$BRIDGE_SMTP_PORT &
+	socat TCP-LISTEN:$IMAP_PORT,fork TCP:127.0.0.1:$BRIDGE_IMAP_PORT &
+fi
+
+# Start bridge in non-interactive mode
+/protonmail/proton-bridge --non-interactive
+echo "ProtonMail bridge stopped. waiting 30 seconds before exiting in order to preserve the logs."
+sleep 30 # so we have time to read the logs in case of a crash loop

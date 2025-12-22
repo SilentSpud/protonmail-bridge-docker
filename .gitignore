@@ -1,3 +1,9 @@
 # Ignoring IDE-specific files
 .idea/*
 .vscode
+
+# Ignore credential files
+bridge_*.txt
+*.env
+**/credentials
+build/docker-compose.yml

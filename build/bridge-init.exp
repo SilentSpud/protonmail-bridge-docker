@@ -1,0 +1,390 @@
+#!/usr/bin/env expect -f
+
+# ProtonMail Bridge Setup Script
+# This script automates the configuration of ProtonMail Bridge
+
+set timeout -1
+
+# Get environment variables
+set bridge_smtp_port $env(BRIDGE_SMTP_PORT)
+set bridge_imap_port $env(BRIDGE_IMAP_PORT)
+set disable_telemetry [expr {[info exists env(DISABLE_TELEMETRY)] ? $env(DISABLE_TELEMETRY) : "false"}]
+set disable_auto_update [expr {[info exists env(DISABLE_AUTO_UPDATE)] ? $env(DISABLE_AUTO_UPDATE) : "false"}]
+set use_tls [expr {[info exists env(USE_TLS)] ? $env(USE_TLS) : "false"}]
+set bridge_user [expr {[info exists env(BRIDGE_USER)] ? $env(BRIDGE_USER) : ""}]
+set bridge_password [expr {[info exists env(BRIDGE_PASSWORD)] ? $env(BRIDGE_PASSWORD) : ""}]
+set bridge_otp [expr {[info exists env(BRIDGE_OTP)] ? $env(BRIDGE_OTP) : ""}]
+set info_dir [expr {[info exists env(INFO_DIR)] ? $env(INFO_DIR) : ""}]
+set auto_setup [expr {[info exists env(AUTO_SETUP)] ? $env(AUTO_SETUP) : "false"}]
+
+# Because protonmail insists on using ANSI codes everywhere
+proc strip_ansi {s} {
+    regsub -all {\033\[[0-9;]*[mK]} $s {} s
+    return $s
+}
+
+# Start bridge
+spawn proton-bridge --cli
+
+# Wait for initial prompt
+expect ">>>"
+
+#region Set SMTP port
+send "change smtp-port\r"
+expect {
+	-re {Set SMTP port \(current ([0-9]+)\):} {
+		set existing_smtp_port $expect_out(1,string)
+		if {$existing_smtp_port == $bridge_smtp_port} {
+			send "\x03"
+			expect ">>>"
+		} else {
+			send "$bridge_smtp_port\r"
+			expect {
+				-re {Port [0-9]+ is occupied by another process\.} {
+					send_error "Port $bridge_smtp_port is occupied by another process"
+					exit 1
+				}
+				">>>" {}
+			}
+		}
+	}
+}
+#endregion
+
+#region Set IMAP port
+send "change imap-port\r"
+expect {
+	-re {Set IMAP port \(current ([0-9]+)\):} {
+		set existing_imap_port $expect_out(1,string)
+		if {$existing_imap_port == $bridge_imap_port} {
+			send "\x03"
+			expect ">>>"
+		} else {
+			send "$bridge_imap_port\r"
+			expect {
+				-re {Port [0-9]+ is occupied by another process\.} {
+					send_error "Port $bridge_imap_port is occupied by another process"
+					exit 1
+				}
+				">>>" {}
+			}
+		}
+	}
+}
+
+#region Configure telemetry
+if {$disable_telemetry eq "true"} {
+	send "telemetry disable\r"
+	expect {
+		"Usage diagnostics collection is disabled." {
+			expect ">>>"
+		}
+		"Usage diagnostics collection is enabled right now." {
+			expect "Do you want to disable usage diagnostics collection?"
+			send "yes\r"
+			expect ">>>"
+		}
+	}
+} else {
+	send "telemetry enable\r"
+	expect {
+		"Usage diagnostics collection is enabled." {
+			expect ">>>"
+		}
+		"Usage diagnostics collection is disabled right now." {
+			expect "Do you want to enable usage diagnostics collection?"
+			send "yes\r"
+			expect ">>>"
+		}
+	}
+}
+#endregion
+
+#region Configure updates
+if {$disable_auto_update eq "true"} {
+	send "updates autoupdates disable\r"
+	expect {
+		"Bridge is already set to NOT automatically install updates." {
+			expect ">>>"
+		}
+		"Bridge is currently set to automatically install updates." {
+			expect "Are you sure you want to stop bridge from doing this?"
+			send "yes\r"
+			expect ">>>"
+		}
+	}
+} else {
+	send "updates autoupdates enable\r"
+	expect {
+		"Bridge is already set to automatically install updates." {
+			expect ">>>"
+		}
+		"Bridge is currently set to NOT automatically install updates." {
+			expect "Are you sure you want to allow bridge to do this?"
+			send "yes\r"
+			expect ">>>"
+		}
+	}
+}
+
+#region Set IMAP protocol
+# USE_TLS=true means STARTTLS, USE_TLS=false means SSL
+send "change imap-security\r"
+expect {
+	-re {Are you sure you want to change IMAP setting to "STARTTLS"\?} {
+		# Currently SSL
+		if {$use_tls eq "true"} {
+			send "yes\r"
+		} else {
+			send "no\r"
+		}
+		expect ">>>"
+	}
+	-re {Are you sure you want to change IMAP setting to "SSL"\?} {
+		# Currently STARTTLS
+		if {$use_tls eq "true"} {
+			send "no\r"
+		} else {
+			send "yes\r"
+		}
+		expect ">>>"
+	}
+}
+#endregion
+
+#region Set SMTP protocol
+send "change smtp-security\r"
+expect {
+	-re {Are you sure you want to change SMTP setting to "STARTTLS"\?} {
+		# Currently SSL
+		if {$use_tls eq "true"} {
+			send "yes\r"
+		} else {
+			send "no\r"
+		}
+		expect ">>>"
+	}
+	-re {Are you sure you want to change SMTP setting to "SSL"\?} {
+		# Currently STARTTLS
+		if {$use_tls eq "true"} {
+			send "no\r"
+		} else {
+			send "yes\r"
+		}
+		expect ">>>"
+	}
+}
+#endregion
+
+#region Login
+# Check if there are existing accounts
+set needs_login 0
+send "list\r"
+
+# Wait briefly for the specific "No active accounts..." message.
+# If not received, assume the prompt indicates existing accounts.
+set timeout 1
+expect {
+	"No active accounts. Please add account to continue." {
+		set needs_login 1
+		expect ">>>"
+	}
+	timeout {
+		expect ">>>"
+	}
+}
+set timeout -1
+
+if {$needs_login} {
+	# If auto_setup is false and credentials are missing, prompt user
+	if {$auto_setup ne "true"} {
+		if {$bridge_user eq ""} {
+			send_user "Enter ProtonMail username: "
+			expect_user -re "(.*)\n"
+			set bridge_user $expect_out(1,string)
+		}
+		if {$bridge_password eq ""} {
+			send_user "Enter ProtonMail password: "
+			stty -echo
+			expect_user -re "(.*)\n"
+			set bridge_password $expect_out(1,string)
+			stty echo
+			send_user "\n"
+		}
+	}
+	
+	if {$bridge_user eq "" || $bridge_password eq ""} {
+		send_error "Error: BRIDGE_USER and BRIDGE_PASSWORD must be set for automatic setup"
+		send "exit\r"
+		expect eof
+		exit 1
+	}
+	
+	set login_attempts 0
+	set max_attempts 3
+	set login_success 0
+	
+	while {$login_attempts < $max_attempts && !$login_success} {
+		incr login_attempts
+		
+		send "login\r"
+		expect "Username:"
+		send "$bridge_user\r"
+		expect "Password:"
+		send "$bridge_password\r"
+		
+		expect {
+			-re {\(Code=10004, Status=422\)} {
+				send_error "Login failed: Free accounts cannot use ProtonMail Bridge"
+				send "exit\r"
+				expect eof
+				exit 1
+			}
+			-re {\(Code=8002, Status=422\)} {
+				send_error "Login failed: Incorrect login credentials (attempt $login_attempts of $max_attempts)"
+				expect ">>>"
+				if {$login_attempts < $max_attempts} {
+					if {$auto_setup ne "true"} {
+						# Prompt for credentials again
+						send_user "Enter ProtonMail username: "
+						expect_user -re "(.*)\n"
+						set bridge_user $expect_out(1,string)
+						send_user "Enter ProtonMail password: "
+						stty -echo
+						expect_user -re "(.*)\n"
+						set bridge_password $expect_out(1,string)
+						stty echo
+						send_user "\n"
+					} else {
+						# In auto mode, can't retry interactively
+						send_error "Login failed: Incorrect login credentials"
+						send "exit\r"
+						expect eof
+						exit 1
+					}
+				} else {
+					send_error "Login failed: Maximum login attempts exceeded"
+					send "exit\r"
+					expect eof
+					exit 1
+				}
+			}
+			"Two factor code:" {
+				if {$bridge_otp eq "" && $auto_setup ne "true"} {
+					send_user "Enter 2FA code: "
+					expect_user -re "(.*)\n"
+					set bridge_otp $expect_out(1,string)
+				}
+				send "$bridge_otp\r"
+				expect {
+					-re {\(Code=10004, Status=422\)} {
+						send_error "Login failed: Free accounts cannot use ProtonMail Bridge"
+						send "exit\r"
+						expect eof
+						exit 1
+					}
+					-re {\(Code=8002, Status=422\)} {
+						send_error "Login failed: Incorrect login credentials"
+						expect ">>>"
+						if {$login_attempts < $max_attempts && $auto_setup ne "true"} {
+						  send_user "Enter ProtonMail username: "
+						  expect_user -re "(.*)\n"
+						  set bridge_user $expect_out(1,string)
+						  send_user "Enter ProtonMail password: "
+						  stty -echo
+						  expect_user -re "(.*)\n"
+						  set bridge_password $expect_out(1,string)
+						  stty echo
+						  send_user "\n"
+							set bridge_otp ""
+						} elseif {$login_attempts >= $max_attempts} {
+							send_error "Login failed: Maximum login attempts exceeded"
+							send "exit\r"
+							expect eof
+							exit 1
+						} else {
+							send "exit\r"
+							expect eof
+							exit 1
+						}
+					}
+					-re {Account .+ was added successfully\.} {
+						set login_success 1
+					}
+				}
+			}
+			-re {Account .+ was added successfully\.} {
+				set login_success 1
+			}
+		}
+	}
+	
+	# Change mode to split # TODO: Re-add handling change mode text once i figure out a better way to strip ansi codes
+	send "change mode $bridge_user\ryes\r"
+	expect "A sync has finished" {
+		send "\r"
+		expect ">>>"
+	}
+	
+	# Get Account Info
+	send "info\r"
+	expect ">>> info\r"
+	
+	# Capture all output until prompt
+	expect -re {(.*?)>>>} {
+			set info_raw $expect_out(1,string)
+		set info_output [strip_ansi $info_raw]
+	}
+		set raw_file "$info_dir/proton_credentials.txt"
+		set fp [open $raw_file w]
+		puts -nonewline $fp $info_output
+		close $fp
+	
+	# Parse the info output to extract email/password pairs
+	set credentials_list {}
+	set lines [split $info_output "\n"]
+	set current_email ""
+	set current_password ""
+	
+	foreach line $lines {
+		# Look for Configuration for <email>
+		if {[regexp {Configuration for (.+)$} $line match email]} {
+			set current_email [string trim $email]
+		}
+		# Look for Password: <password> (in IMAP section, first occurrence)
+		if {[regexp {^\s*Password:\s+(.+)$} $line match password]} {
+			if {$current_email ne "" && $current_password eq ""} {
+				set current_password [string trim $password]
+				lappend credentials_list [list $current_email $current_password]
+				set current_email ""
+				set current_password ""
+			}
+		}
+	}
+	
+	# Generate CSV output
+	set csv_output "Email,Password\n"
+	foreach cred $credentials_list {
+		set email [lindex $cred 0]
+		set password [lindex $cred 1]
+		append csv_output "$email,$password\n"
+	}
+	
+	# Output CSV to file or stdout
+	if {$info_dir ne ""} {
+		set csv_file "$info_dir/proton_credentials.csv"
+		set fp [open $csv_file w]
+		puts -nonewline $fp $csv_output
+		close $fp
+		send_user "Credentials saved to: $csv_file"
+	} else {
+		send_user $csv_output
+	}
+}
+#endregion
+
+# Exit upon success
+send "exit\r"
+expect eof
+
+exit 0
