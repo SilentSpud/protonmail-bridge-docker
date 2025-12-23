@@ -117,7 +117,7 @@ fi
 CAP_HEX=$(awk '/CapBnd/ {print $2}' /proc/$BASHPID/status)
 CAP_VAL=$(( 0x${CAP_HEX} & 0x400 ))
 
-if [[ $CAP_VAL == 0x400 ]]; then # NET_BIND_SERVICE capability
+if (( $CAP_VAL == 0x400 )); then # NET_BIND_SERVICE capability
 	socat TCP-LISTEN:$SMTP_PORT,fork TCP:127.0.0.1:$BRIDGE_SMTP_PORT &
 	socat TCP-LISTEN:$IMAP_PORT,fork TCP:127.0.0.1:$BRIDGE_IMAP_PORT &
 else
@@ -136,6 +136,6 @@ else
 fi
 
 # Start bridge in non-interactive mode
-/protonmail/proton-bridge --non-interactive
+proton-bridge --noninteractive
 echo "ProtonMail bridge stopped. waiting 30 seconds before exiting in order to preserve the logs."
 sleep 30 # so we have time to read the logs in case of a crash loop

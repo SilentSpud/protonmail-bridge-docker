@@ -17,6 +17,17 @@ set bridge_otp [expr {[info exists env(BRIDGE_OTP)] ? $env(BRIDGE_OTP) : ""}]
 set info_dir [expr {[info exists env(INFO_DIR)] ? $env(INFO_DIR) : ""}]
 set auto_setup [expr {[info exists env(AUTO_SETUP)] ? $env(AUTO_SETUP) : "false"}]
 
+# Remove ANSI/control characters from a string while preserving LF, CR and TAB
+proc strip_control_chars {s} {
+	# Remove common ANSI escape sequences (CSI sequences like ESC[...m or ESC[...K])
+	regsub -all {\x1B\[[0-9;?=]*[A-Za-z]} $s {} s
+
+	# Remove other C0 control characters except \n (LF, 0x0A), \r (CR, 0x0D) and \t (TAB, 0x09)
+	# Range: 0x00-0x08, 0x0B-0x0C, 0x0E-0x1F, and DEL 0x7F
+	regsub -all {[\x00-\x08\x0B-\x0C\x0E-\x1F\x7F]} $s {} s
+	return $s
+}
+
 # Because protonmail insists on using ANSI codes everywhere
 proc strip_ansi {s} {
     regsub -all {\033\[[0-9;]*[mK]} $s {} s
@@ -332,13 +343,10 @@ if {$needs_login} {
 	
 	# Capture all output until prompt
 	expect -re {(.*?)>>>} {
-			set info_raw $expect_out(1,string)
-		set info_output [strip_ansi $info_raw]
+		set info_output $expect_out(1,string)
+		set info_output [strip_ansi $info_output]
+		set info_output [strip_control_chars $info_output]
 	}
-		set raw_file "$info_dir/proton_credentials.txt"
-		set fp [open $raw_file w]
-		puts -nonewline $fp $info_output
-		close $fp
 	
 	# Parse the info output to extract email/password pairs
 	set credentials_list {}
